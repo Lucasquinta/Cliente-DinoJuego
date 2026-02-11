@@ -528,7 +528,7 @@ public class PantallaMultijugador implements Screen {
 
         if (finDelJuego) {
             String texto = "GANA JUGADOR " + ganador;
-            float x = camara.position.x - 200;
+            float x = camara.position.x - 350;
             float y = camara.position.y + 100;
 
             fuenteTitulo.draw(juego.batch, texto, x, y);
