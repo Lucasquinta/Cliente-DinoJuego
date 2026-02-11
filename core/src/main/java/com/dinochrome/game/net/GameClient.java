@@ -1,14 +1,17 @@
+// =====================================================
+// ARCHIVO: GameClient.java
+// PAQUETE: com.dinochrome.game.net
+// =====================================================
 package com.dinochrome.game.net;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 
 public class GameClient {
 
-    // Servidor
-    private static final String HOST = "127.0.0.1"; // cambiá por IP real si hace falta
     private static final int PUERTO = 4321;
 
     private DatagramSocket socket;
@@ -23,42 +26,91 @@ public class GameClient {
     public volatile PlayerState otherPlayer = null;
 
     // Callbacks
-    public interface ObstaculoCallback {
-        void onRecibir(EstadoObstaculo o);
-    }
-    public interface StartCallback {
-        void onStart();
-    }
+    public interface ObstaculoCallback { void onRecibir(EstadoObstaculo o); }
+    public interface StartCallback { void onStart(); }
 
     public ObstaculoCallback onObstacleReceived;
     public StartCallback onStartGame;
 
     public GameClient() {
         try {
-            ipServidor = InetAddress.getByName(HOST);
             socket = new DatagramSocket();
-            socket.setSoTimeout(50);
+            socket.setBroadcast(true);
+            socket.setSoTimeout(300);
 
-            // Pedir entrar
-            enviarTexto("JOIN");
+            // 1) Descubrir servidor por broadcast
+            ipServidor = descubrirServidor();
+            if (ipServidor == null) {
+                throw new RuntimeException("No se encontró servidor (broadcast)");
+            }
 
-            // Thread de recepción
+            // 2) Thread de recepción
             Thread t = new Thread(this::loopRecepcion, "Cliente-UDP");
             t.setDaemon(true);
             t.start();
+
+            // 3) Pedir entrar con reintentos (UDP)
+            Thread joinRetry = new Thread(() -> {
+                while (myId == 0) {
+                    enviarTexto("JOIN");
+                    try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+                }
+            }, "Join-Retry");
+            joinRetry.setDaemon(true);
+            joinRetry.start();
 
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
+    // -------------------------
+    // Descubrimiento por broadcast
+    // -------------------------
+    private InetAddress descubrirServidor() {
+        try {
+            InetAddress broadcast = InetAddress.getByName("255.255.255.255");
+
+            byte[] data = "BUSCAR_SERVIDOR".getBytes(StandardCharsets.UTF_8);
+            DatagramPacket p = new DatagramPacket(data, data.length, broadcast, PUERTO);
+
+            // Reintentos
+            for (int i = 0; i < 8; i++) {
+                socket.send(p);
+
+                DatagramPacket resp = new DatagramPacket(new byte[256], 256);
+                try {
+                    socket.receive(resp);
+                    String msg = new String(
+                        resp.getData(),
+                        0,
+                        resp.getLength(),
+                        StandardCharsets.UTF_8
+                    ).trim();
+
+                    if (msg.equals("SERVIDOR_AQUI")) {
+                        return resp.getAddress();
+                    }
+
+                } catch (SocketTimeoutException timeout) {
+                    // sigue intentando
+                }
+            }
+
+        } catch (Exception ignored) {}
+
+        return null;
+    }
+
+    // -------------------------
+    // API
+    // -------------------------
     public void sendReady() {
         ready = true;
         enviarTexto("READY");
     }
 
     public void send(PlayerState estado) {
-        // STATE;id=1;x=80.0;y=40.0;duck=0
         String msg = "STATE;id=" + estado.playerId
             + ";x=" + estado.x
             + ";y=" + estado.y
@@ -66,6 +118,13 @@ public class GameClient {
         enviarTexto(msg);
     }
 
+    public void cerrar() {
+        if (socket != null && !socket.isClosed()) socket.close();
+    }
+
+    // -------------------------
+    // Recepción
+    // -------------------------
     private void loopRecepcion() {
         byte[] buffer = new byte[2048];
 
@@ -74,25 +133,30 @@ public class GameClient {
                 DatagramPacket p = new DatagramPacket(buffer, buffer.length);
                 socket.receive(p);
 
-                String msg = new String(p.getData(), 0, p.getLength(), StandardCharsets.UTF_8).trim();
+                String msg = new String(
+                    p.getData(),
+                    0,
+                    p.getLength(),
+                    StandardCharsets.UTF_8
+                ).trim();
+
                 procesar(msg);
 
             } catch (Exception e) {
-                // timeout y otros: ignoramos para mantener loop simple
+                // ignoramos timeouts y demás
             }
         }
     }
 
     private void procesar(String msg) {
+
         if (msg.startsWith("ASSIGN;")) {
-            // ASSIGN;id=1
             Integer id = leerEntero(msg, "id");
             if (id != null) myId = id;
             return;
         }
 
         if (msg.startsWith("COUNT;")) {
-            // COUNT;players=2
             Integer c = leerEntero(msg, "players");
             if (c != null) playerCount = c;
             return;
@@ -112,15 +176,16 @@ public class GameClient {
 
         if (msg.startsWith("OBST;")) {
             EstadoObstaculo eo = parsearObstaculo(msg);
-            if (eo != null && onObstacleReceived != null) onObstacleReceived.onRecibir(eo);
-            return;
+            if (eo != null && onObstacleReceived != null) {
+                onObstacleReceived.onRecibir(eo);
+            }
         }
-
-        // FULL / ERROR / READY;... etc: opcional
     }
 
+    // -------------------------
+    // Parseos
+    // -------------------------
     private PlayerState parsearPlayerState(String msg) {
-        // STATE;id=2;x=140.0;y=40.0;duck=1
         try {
             PlayerState ps = new PlayerState();
 
@@ -143,7 +208,6 @@ public class GameClient {
     }
 
     private EstadoObstaculo parsearObstaculo(String msg) {
-        // OBST;x=800;y=40;w=24;h=38;t=0
         try {
             EstadoObstaculo o = new EstadoObstaculo();
 
@@ -168,6 +232,9 @@ public class GameClient {
         }
     }
 
+    // -------------------------
+    // Helpers
+    // -------------------------
     private Integer leerEntero(String msg, String clave) {
         String v = leerValor(msg, clave);
         if (v == null) return null;
@@ -181,7 +248,6 @@ public class GameClient {
     }
 
     private String leerValor(String msg, String clave) {
-        // Busca "clave=" y lee hasta ';' o fin
         String patron = clave + "=";
         int i = msg.indexOf(patron);
         if (i == -1) return null;
@@ -195,16 +261,10 @@ public class GameClient {
 
     private void enviarTexto(String msg) {
         try {
+            if (ipServidor == null) return;
             byte[] data = msg.getBytes(StandardCharsets.UTF_8);
             DatagramPacket p = new DatagramPacket(data, data.length, ipServidor, PUERTO);
             socket.send(p);
-        } catch (Exception e) {
-            // si falla, no explota la pantalla; solo no hay red
-        }
-    }
-
-    // Si querés cerrar prolijo
-    public void cerrar() {
-        if (socket != null && !socket.isClosed()) socket.close();
+        } catch (Exception ignored) {}
     }
 }
