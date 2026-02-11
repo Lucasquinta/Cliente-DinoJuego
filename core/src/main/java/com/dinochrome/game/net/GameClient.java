@@ -4,10 +4,7 @@
 // =====================================================
 package com.dinochrome.game.net;
 
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
-import java.net.InetAddress;
-import java.net.SocketTimeoutException;
+import java.net.*;
 import java.nio.charset.StandardCharsets;
 
 public class GameClient {
@@ -69,38 +66,64 @@ public class GameClient {
     // -------------------------
     private InetAddress descubrirServidor() {
         try {
-            InetAddress broadcast = InetAddress.getByName("255.255.255.255");
+            // Para recibir respuestas
+            socket.setSoTimeout(300);
 
             byte[] data = "BUSCAR_SERVIDOR".getBytes(StandardCharsets.UTF_8);
-            DatagramPacket p = new DatagramPacket(data, data.length, broadcast, PUERTO);
 
-            // Reintentos
-            for (int i = 0; i < 8; i++) {
-                socket.send(p);
+            // 1) Intento broadcast por cada interfaz de red
+            for (NetworkInterface ni : java.util.Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!ni.isUp() || ni.isLoopback()) continue;
 
-                DatagramPacket resp = new DatagramPacket(new byte[256], 256);
-                try {
-                    socket.receive(resp);
-                    String msg = new String(
-                        resp.getData(),
-                        0,
-                        resp.getLength(),
-                        StandardCharsets.UTF_8
-                    ).trim();
+                for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
+                    InetAddress bcast = ia.getBroadcast();
+                    if (bcast == null) continue;
 
-                    if (msg.equals("SERVIDOR_AQUI")) {
-                        return resp.getAddress();
+                    // Reintentos por cada broadcast
+                    for (int intento = 0; intento < 4; intento++) {
+                        DatagramPacket p = new DatagramPacket(data, data.length, bcast, PUERTO);
+                        socket.send(p);
+
+                        InetAddress encontrado = esperarRespuestaServidor();
+                        if (encontrado != null) return encontrado;
                     }
-
-                } catch (SocketTimeoutException timeout) {
-                    // sigue intentando
                 }
             }
 
+            // 2) Fallback: broadcast global (a veces sirve, a veces no)
+            InetAddress global = InetAddress.getByName("255.255.255.255");
+            for (int i = 0; i < 8; i++) {
+                DatagramPacket p = new DatagramPacket(data, data.length, global, PUERTO);
+                socket.send(p);
+
+                InetAddress encontrado = esperarRespuestaServidor();
+                if (encontrado != null) return encontrado;
+            }
+
+        } catch (Exception e) {
+            // Si querés debug real:
+            // e.printStackTrace();
+        }
+
+        return null;
+    }
+
+    private InetAddress esperarRespuestaServidor() {
+        try {
+            DatagramPacket resp = new DatagramPacket(new byte[256], 256);
+            socket.receive(resp);
+
+            String msg = new String(resp.getData(), 0, resp.getLength(), StandardCharsets.UTF_8).trim();
+            if (msg.equals("SERVIDOR_AQUI")) {
+                return resp.getAddress();
+            }
+        } catch (SocketTimeoutException timeout) {
+            // normal
         } catch (Exception ignored) {}
 
         return null;
     }
+
 
     // -------------------------
     // API
